@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pretraining Glossary</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body class="ref">
+<main>
+<div class="crumbs">Reference · <a href="compute-budget.html">Compute cheat sheet</a> · <a href="../lessons/0002-architecture-map.html">Lesson 02</a></div>
+<h1>Pretraining Glossary</h1>
+<p class="subtitle">The words every lesson in this course uses. When the field uses several names for one thing, this page picks one.</p>
+
+<div class="grid2">
+<div>
+<h2>Inputs to the model</h2>
+<dl class="gloss">
+<dt>Token ID</dt>
+<dd>An integer index into the vocabulary produced by the tokenizer. It is the only thing the embedding layer sees.</dd>
+<dt>Special token</dt>
+<dd>A token ID reserved for a control symbol (EOS, <code>&lt;assistant&gt;</code>) that ordinary text never tokenizes into.</dd>
+<dt>Position ID</dt>
+<dd>The integer each token's RoPE rotation is computed from. By default it equals the token's index, but it's a separate input that can differ (see <em>aliasing</em>).<br><span class="avoid">Avoid: "position", when you mean the index</span></dd>
+<dt>Index</dt>
+<dd>A token's physical slot in the sequence array (0…S−1). In this course, "index" and "position ID" are never used interchangeably.</dd>
+<dt>Attention mask</dt>
+<dd>A boolean [query, key] matrix that says which tokens a token may <em>see</em>. Blocked scores are set to −∞ before the softmax.</dd>
+<dt>Loss mask</dt>
+<dd>A per-position weight in {0, 1} that says which next-token predictions the model is trained to <em>produce</em>. Levanter calls it <code>loss_weight</code>.<br><span class="avoid">Avoid: "label mask", "ignore mask"</span></dd>
+</dl>
+</div>
+<div>
+<h2>SPP</h2>
+<dl class="gloss">
+<dt>Reflection</dt>
+<dd>A short (≤128-token) first-person, constitution-grounded passage inserted into an annotated document, preceded by <code>&lt;assistant&gt;</code>.</dd>
+<dt>Insertion point (n)</dt>
+<dd>The index where <code>&lt;assistant&gt;</code> is placed. The reflection is conditioned only on the tokens before it.</dd>
+<dt>Pre-context / post-context</dt>
+<dd>The document tokens before and after the reflection block.</dd>
+<dt>Aliasing (RoPE aliasing)</dt>
+<dd>Giving post-context tokens position IDs that restart at n, so their relative distances to the pre-context match a document with no reflection.</dd>
+<dt>Reflection block mask</dt>
+<dd>The SPP attention-mask edit: post-context queries can't attend to reflection-block keys.</dd>
+<dt>Compact / annotated stream</dt>
+<dd>Compact: ordinary documents packed densely into windows. Annotated: one reflection-eligible document per padded window.</dd>
+</dl>
+<h2>Compute</h2>
+<dl class="gloss">
+<dt>TPP</dt><dd>Training tokens per parameter, D / N.</dd>
+<dt>MFU</dt><dd>Model FLOPs (6ND) achieved ÷ hardware peak FLOPs over the same time.</dd>
+</dl>
+</div>
+</div>
+</main>
+</body>
+</html>

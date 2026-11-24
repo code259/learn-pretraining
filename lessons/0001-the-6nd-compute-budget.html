@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The 6ND Budget</title>
+<link rel="stylesheet" href="../assets/style.css">
+<script src="../assets/quiz.js" defer></script>
+</head>
+<body>
+<main>
+
+<div class="crumbs">Lesson 01 · <a href="../reference/compute-budget.html">Compute cheat sheet</a> · <a href="../reference/glossary.html">Glossary</a></div>
+<h1>The 6ND Budget</h1>
+<p class="subtitle">How to cost out a 1.4B-parameter, 20-tokens-per-parameter run before it starts, using one multiplication.</p>
+
+<div class="mission">
+Your next Marin milestone after the SPP replication is a <strong>1.4B model at 20 TPP on TPUs</strong>. By the end of this lesson you'll be able to work out, on a napkin, how many FLOPs that run needs, how many chip-hours it costs, and how it compares to the largest SPP runs. Every scaling-law paper you read assumes you can do this.
+</div>
+
+<h2>1 · Where the 6 comes from</h2>
+
+<p>Almost all of a transformer's compute is matrix multiplies. Multiplying an <code>N×P</code> matrix by a <code>P×M</code> one costs <strong>2NPM</strong> FLOPs: one multiply and one add for each of the NPM products.<a class="cite" href="https://jax-ml.github.io/scaling-book/transformers">scaling book §Forward and reverse FLOPs</a></p>
+
+<p>Read it as a weight matrix <code>W</code> of shape <code>P×M</code> (so <code>PM</code> parameters) acting on <code>N</code> tokens:</p>
+
+<ul>
+<li><strong>Forward:</strong> <code>Y = XW</code> costs <strong>2</strong> FLOPs per parameter per token.</li>
+<li><strong>Backward:</strong> you need two gradients, <code>∂L/∂W = Xᵀ·∂L/∂Y</code> (to update the weights) and <code>∂L/∂X = ∂L/∂Y·Wᵀ</code> (to keep backpropagating). Each is another matmul of the same size, so that's <strong>4</strong> more.</li>
+</ul>
+
+<p>You've written autograd, so you've seen this already: the backward pass of a linear layer does two matmuls. Add them up and every parameter costs 6 FLOPs per training token:<a class="cite" href="https://jax-ml.github.io/scaling-book/transformers">scaling book</a></p>
+
+<div class="eq">C ≈ 6 · N · D
+<span class="lbl">C = training FLOPs · N = parameters · D = training tokens</span></div>
+
+<p>Inference is the forward pass alone, so it costs 2N per token. That's why training is about 3× inference per token.</p>
+
+<div class="note">
+<strong>What 6ND leaves out.</strong> (1) <em>Attention's</em> <code>QKᵀ</code> and <code>·V</code> FLOPs. They grow with sequence length <code>T</code>, and only dominate once <code>T &gt; 8·d<sub>model</sub></code>. For a 1.4B model (d<sub>model</sub> around 2048) that's past roughly 16k tokens, far longer than a typical pretraining context.<a class="cite" href="https://jax-ml.github.io/scaling-book/transformers">scaling book §attention cost</a> (2) <em>Rematerialisation</em> (gradient checkpointing) reruns parts of the forward pass, which pushes the cost toward about <strong>8ND</strong>.<a class="cite" href="https://jax-ml.github.io/scaling-book/transformers">scaling book §Gradient checkpointing</a> (3) What counts toward <strong>N</strong>? Kaplan et al. counted only non-embedding parameters,<a class="cite" href="https://arxiv.org/abs/2001.08361">Kaplan 2020</a> so check which convention a paper (and Marin's "1.4B") uses. That's lesson 2.
+</div>
+
+<h2>2 · Where "20 tokens per parameter" comes from</h2>
+
+<p>Chinchilla (Hoffmann et al., 2022) trained more than 400 models and found that, for a fixed compute budget, parameters and tokens should grow at roughly the same rate. Their flagship had <strong>70B params trained on 1.4T tokens</strong>, matching Gopher's compute with a model 4× smaller.<a class="cite" href="https://arxiv.org/abs/2203.15556">Hoffmann 2022</a> 1.4T ÷ 70B = <strong>20</strong>. That ratio became the default "compute-optimal" <strong>TPP</strong> (tokens per parameter).</p>
+
+<p>"Compute-optimal" means the lowest loss for a given training compute. Inference cost isn't part of it. That's why modern models go far past 20: Llama 3 70B saw 15T tokens,<a class="cite" href="https://jax-ml.github.io/scaling-book/applied-training">scaling book §LLaMA 3</a> which is about 214 TPP. At 20 TPP, your 1.4B run is sized as a clean scaling-law point, not a product model.</p>
+
+<h2>3 · From FLOPs to wall-clock</h2>
+
+<p>Hardware never reaches its peak. <strong>MFU</strong> (model FLOPs utilisation) is the fraction of peak FLOPs/s that goes into the model's actual 6ND math. The scaling book uses <strong>40%</strong> as a reasonable assumption.<a class="cite" href="https://jax-ml.github.io/scaling-book/applied-training">scaling book</a></p>
+
+<div class="eq">time ≈ C / (chips · peak FLOPs/s per chip · MFU)</div>
+
+<div class="table-wrap"><table>
+<tr><th>TPU</th><th class="num">peak bf16 FLOPs/s per chip</th></tr>
+<tr><td>v4p</td><td class="num">2.75e14</td></tr>
+<tr><td>v5e</td><td class="num">1.97e14</td></tr>
+<tr><td>v5p</td><td class="num">4.59e14</td></tr>
+<tr><td>v6e (Trillium)</td><td class="num">9.20e14</td></tr>
+</table></div>
+<p style="font-size:.85rem;color:var(--muted);margin-top:-.5rem">Source: <a href="https://jax-ml.github.io/scaling-book/tpus">scaling book, §TPU specs</a>.</p>
+
+<h3>Worked example: Llama 3 70B</h3>
+<p>C = 6 × 70e9 × 15e12 = <strong>6.3e24 FLOPs</strong>. On a full v5p pod (8,960 chips) at 40% MFU: 6.3e24 / (8960 × 4.59e14 × 0.4) ≈ 3.8e6 s ≈ <strong>44 days</strong>.<a class="cite" href="https://jax-ml.github.io/scaling-book/applied-training">scaling book §LLaMA 3</a></p>
+
+<h2>4 · Your turn: cost out the 1.4B run</h2>
+<p>Use a scratch pad or a Python REPL, not this page. Enter answers like <code>2.8e10</code>. Anything within 3% counts.</p>
+
+<div class="ex num" data-answer="2.8e10" data-unit="tokens">
+<p class="q"><span class="tag">Exercise 1</span>At 20 TPP, how many training tokens <em>D</em> does the 1.4B model see?</p>
+<div class="explain">D = 20 × 1.4e9 = <strong>2.8e10</strong> = 28B tokens.</div>
+</div>
+
+<div class="ex num" data-answer="2.352e20" data-unit="FLOPs">
+<p class="q"><span class="tag">Exercise 2</span>Total training compute <em>C</em> for the run (ignore attention and remat)?</p>
+<div class="explain">C = 6 × 1.4e9 × 2.8e10 = <strong>2.35e20 FLOPs</strong>. Note that at fixed TPP, C = 6 · 20 · N², so compute grows with the square of model size.</div>
+</div>
+
+<div class="ex num" data-answer="829" data-unit="chip-hours">
+<p class="q"><span class="tag">Exercise 3</span>On TPU v5e at 40% MFU, how many <strong>chip-hours</strong> is that?</p>
+<div class="explain">Effective per-chip rate = 1.97e14 × 0.4 = 7.88e13 FLOPs/s. 2.352e20 / 7.88e13 ≈ 2.98e6 chip-seconds ÷ 3600 ≈ <strong>829 chip-hours</strong>.</div>
+</div>
+
+<div class="ex num" data-answer="12.95" data-unit="hours">
+<p class="q"><span class="tag">Exercise 4</span>If it runs on 64 v5e chips with perfect scaling, what's the wall-clock time?</p>
+<div class="explain">829 / 64 ≈ <strong>13 hours</strong>. So this run is cheap. What will actually limit you is the cost of the ablations and evals around it.</div>
+</div>
+
+<div class="ex num" data-answer="38.3" data-unit="× the 1.4B run">
+<p class="q"><span class="tag">Exercise 5</span>The SPP paper's largest experiments reach about 3B params and 500B tokens.<a class="cite" href="https://arxiv.org/abs/2608.13482">Minder 2026</a> How many times the compute of your 1.4B / 20 TPP run is that?</p>
+<div class="explain">6 × 3e9 × 5e11 = 9e21 FLOPs. 9e21 / 2.352e20 ≈ <strong>38×</strong>. That's about 167 TPP, deep in the "over-trained" regime. Worth asking: the paper reports SPP's advantage <em>grows with pretraining budget</em>, so what would you expect at 20 TPP?</div>
+</div>
+
+<h2>5 · Check your understanding</h2>
+
+<div class="ex mc" data-answer="1">
+<p class="q">Why is the training constant 6 rather than 2?</p>
+<div class="opts">
+<button>Attention layers 4, MLP layers 2</button>
+<button>Forward pass 2, backward pass 4</button>
+<button>Forward pass 2, optimizer step 4</button>
+<button>Forward pass 4, backward pass 2</button>
+</div>
+<div class="explain">Backward needs two matmuls per weight: one for ∂L/∂W and one for ∂L/∂X. The optimizer update is elementwise, about O(N) per <em>step</em> rather than per token, so it rounds to zero.</div>
+</div>
+
+<div class="ex mc" data-answer="2">
+<p class="q">Marin goes from 1.4B to 2.8B params, keeping 20 TPP. Training compute multiplies by:</p>
+<div class="opts">
+<button>8×</button>
+<button>2×</button>
+<button>4×</button>
+<button>√2×</button>
+</div>
+<div class="explain">At fixed TPP, D scales with N, so C = 6·N·(20N) ∝ N². Doubling N gives 4× the compute.</div>
+</div>
+
+<div class="ex mc" data-answer="0">
+<p class="q">MFU is best defined as…</p>
+<div class="opts">
+<button>Achieved model FLOPs over hardware peak FLOPs</button>
+<button>Achieved memory bandwidth over hardware peak bandwidth</button>
+<button>Model parameters over total device memory capacity</button>
+<button>Training tokens over total model parameter count</button>
+</div>
+<div class="explain">MFU counts only the model's 6ND math. Recomputed (remat) FLOPs don't count, which is why remat lowers MFU even though the chip is just as busy.</div>
+</div>
+
+<div class="ex mc" data-answer="3">
+<p class="q">When does ignoring attention FLOPs stop being safe?</p>
+<div class="opts">
+<button>When vocabulary size exceeds 8× d_model</button>
+<button>When batch size exceeds 8× d_model</button>
+<button>When layer count exceeds 8× d_model</button>
+<button>When sequence length exceeds 8× d_model</button>
+</div>
+<div class="explain">Attention-to-matmul FLOPs ratio is about T / (8D). Long-context training (e.g. Kimi's 1M context) is where this starts to dominate.</div>
+</div>
+
+<div class="score"></div>
+
+<h2>Stretch · Measure your own Mac</h2>
+<p>Peak numbers are marketing. Measure what you actually get, which is the first step of any performance work. Run this with <code>pip install mlx</code>:</p>
+<pre><code>import mlx.core as mx, time
+n = 4096
+a = mx.random.normal((n, n)).astype(mx.bfloat16)
+b = mx.random.normal((n, n)).astype(mx.bfloat16)
+for _ in range(3): mx.eval(a @ b)          # warm up
+iters = 50
+t = time.perf_counter()
+for _ in range(iters): mx.eval(a @ b)
+dt = time.perf_counter() - t
+print(f"{2 * n**3 * iters / dt / 1e12:.2f} TFLOP/s")   # 2NPM, from §1
+</code></pre>
+<p>Then plug your number into the formula. How long would the 1.4B run take on your laptop at 100% MFU? What about a 10M-param char-level model on 100M tokens? The second one is your first from-scratch training target.</p>
+
+<div class="source">
+Read <a href="https://jax-ml.github.io/scaling-book/transformers"><em>How to Scale Your Model</em>, ch. "All the Transformer Math You Need to Know"</a> (Austin et al., Google DeepMind). It's written for TPUs and JAX, the same stack Marin uses. Focus on <em>Forward and reverse FLOPs</em> and <em>Global FLOPs and Params Calculation</em>, and try its practice questions.
+</div>
+
+<div class="ask">
+Anything unclear, like why ∂L/∂X is needed, or what Marin's real slice size is? Ask me in the terminal. Also bring back your Mac's TFLOP/s number and we'll use it to plan your local training runs.
+</div>
+
+<div class="next">
+<span>Side lesson (optional)</span>
+<span><a href="../reference/compute-budget.html">Compute cheat sheet</a> · Main track: <a href="0002-architecture-map.html">Lesson 02: The Architecture Map</a></span>
+</div>
+
+</main>
+</body>
+</html>

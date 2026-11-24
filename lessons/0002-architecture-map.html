@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The Architecture Map</title>
+<link rel="stylesheet" href="../assets/style.css">
+<script src="../assets/quiz.js" defer></script>
+</head>
+<body>
+<main>
+
+<div class="crumbs">Lesson 02 · <a href="../reference/glossary.html">Glossary</a> · Side lesson: <a href="0001-the-6nd-compute-budget.html">the 6ND budget</a></div>
+<h1>The Architecture Map</h1>
+<p class="subtitle">One token's path through the SPP model, and the four places your replication changes it.</p>
+
+<div class="mission">
+SPP changes <strong>no weights and no layers</strong>. Everything it does is in <em>what goes into</em> a standard Llama-style decoder: which documents (data mixing), which tokens (tokenization), which positions (RoPE), and who can see whom (attention mask). This lesson is the map. The next lessons go deep on each of those four points.
+</div>
+
+<h2>1 · The model you're replicating</h2>
+<p>The SPP 3B model is <em>Llama-3.2-3B-shaped</em>: a dense decoder-only transformer with RoPE, RMSNorm, SwiGLU and tied embeddings, using the SmolLM2 tokenizer.<a class="cite" href="https://github.com/epfl-dlab/spp-training/blob/main/docs/04-pretraining.md">spp-training docs</a></p>
+<div class="table-wrap"><table>
+<tr><th>Hyperparameter</th><th class="num">3B</th><th class="num">1.7B</th></tr>
+<tr><td>Layers</td><td class="num">28</td><td class="num">24</td></tr>
+<tr><td>Hidden size d<sub>model</sub></td><td class="num">3072</td><td class="num">2048</td></tr>
+<tr><td>Attention</td><td class="num">24 q-heads, 8 kv-heads (GQA)</td><td class="num">32 heads (MHA)</td></tr>
+<tr><td>Vocab</td><td class="num">49,152 + &lt;assistant&gt;</td><td class="num">same</td></tr>
+<tr><td>Sequence length</td><td class="num">2048</td><td class="num">2048</td></tr>
+<tr><td>Tokens</td><td class="num">500B</td><td class="num">100B</td></tr>
+</table></div>
+
+<h2>2 · The forward pass</h2>
+<p>Shapes use Levanter's named axes. In <code>llama.py</code>, a decoder layer is literally the five lines inside the dashed box below.<a class="cite" href="https://github.com/marin-community/marin/blob/main/lib/levanter/src/levanter/models/llama.py">levanter llama.py · LlamaDecoderLayer</a> Stages marked in orange are the ones SPP changes.</p>
+
+<div class="pipe">
+  <div class="stage hot"><span class="name">Data mixture → documents <span class="plug">data mixing</span></span><span class="shape">docs</span>
+    <span class="what">Choose which documents fill each batch, in what proportions, and whether they're packed or padded.</span></div>
+  <div class="arrow">↓</div>
+  <div class="stage hot"><span class="name">Tokenizer <span class="plug">tokenization</span></span><span class="shape">[position] int</span>
+    <span class="what">Text → integer IDs using byte-level BPE. Special tokens (EOS, &lt;assistant&gt;) are single IDs the tokenizer never produces from ordinary text.</span></div>
+  <div class="arrow">↓</div>
+  <div class="stage"><span class="name">Embedding lookup</span><span class="shape">[position, embed]</span>
+    <span class="what">Row <code>E[id]</code> of a V × d<sub>model</sub> matrix. No position information gets added here. That was GPT-2's approach, and modern models don't do it.</span></div>
+  <div class="arrow">↓</div>
+  <div class="block"><span class="lbl">× 28 decoder layers</span>
+    <div class="stage"><span class="name">RMSNorm → q, k, v projections</span><span class="shape">[position, heads, head_size]</span>
+      <span class="what">Pre-norm: normalise first, then project. GQA: 24 query heads share 8 key/value heads (3 per group). head_size = 3072/24 = 128.</span></div>
+    <div class="arrow">↓</div>
+    <div class="stage hot"><span class="name">Rotate q and k by position <span class="plug">RoPE</span></span><span class="shape">needs pos_ids</span>
+      <span class="what">Each (q, k) is rotated by an angle proportional to its <em>position ID</em>. That makes q·k depend on <em>relative</em> distance. v is not rotated.</span></div>
+    <div class="arrow">↓</div>
+    <div class="stage hot"><span class="name">Scores, mask, softmax, ·v <span class="plug">attention mask</span></span><span class="shape">[position, key_position]</span>
+      <span class="what">Scores are qkᵀ/√d. Blocked pairs are set to −∞ before the softmax, so they get exactly zero weight. Normally the mask is just "causal", but it can be any boolean matrix.</span></div>
+    <div class="arrow">↓</div>
+    <div class="stage"><span class="name">o-projection, + residual</span><span class="shape">[position, embed]</span>
+      <span class="what"><code>x = x + attn(norm(x))</code></span></div>
+    <div class="arrow">↓</div>
+    <div class="stage"><span class="name">RMSNorm → SwiGLU MLP, + residual</span><span class="shape">[position, embed]</span>
+      <span class="what"><code>down( silu(gate(x)) * up(x) )</code>. This is where most of the parameters and FLOPs are. Each token is processed independently, with no cross-token mixing.</span></div>
+  </div>
+  <div class="arrow">↓</div>
+  <div class="stage"><span class="name">Final RMSNorm → LM head (tied)</span><span class="shape">[position, vocab]</span>
+    <span class="what">Logits = h · Eᵀ, reusing the embedding matrix. So the new <code>&lt;assistant&gt;</code> token's row is both its input and its output vector.</span></div>
+  <div class="arrow">↓</div>
+  <div class="stage hot"><span class="name">Cross-entropy × loss weights <span class="plug">loss mask</span></span><span class="shape">scalar</span>
+    <span class="what">Position <em>i</em> predicts token <em>i+1</em>. Each position's loss is multiplied by a weight in {0, 1}, which decides what the model is trained to <em>generate</em>.</span></div>
+</div>
+
+<p><strong>Two kinds of masking.</strong> The attention mask controls what a token can <em>see</em>. The loss mask controls what the model is trained to <em>produce</em>. They're independent, and SPP uses both. People mix them up constantly, so keep them separate.</p>
+
+<h2>3 · What SPP feeds in</h2>
+<p>Here's a toy version of <code>_make_spp_sample</code> from the SPP dataloader.<a class="cite" href="https://github.com/epfl-dlab/spp-training/blob/main/pretraining/dataloaders/spp_dataloader.py">spp_dataloader.py</a> A document <code>The cat sat on the mat</code> gets a 2-token reflection <code>r1 r2</code> inserted at <code>n = 3</code>, preceded by <code>&lt;assistant&gt;</code>:</p>
+
+<div class="table-wrap"><table class="toks">
+<tr><th>index</th><td>0</td><td>1</td><td>2</td><td class="r">3</td><td class="r">4</td><td class="r">5</td><td>6</td><td>7</td><td>8</td></tr>
+<tr><th>token</th><td>The</td><td>cat</td><td>sat</td><td class="r">&lt;asst&gt;</td><td class="r">r1</td><td class="r">r2</td><td>on</td><td>the</td><td>mat</td></tr>
+<tr><th>predicts</th><td>cat</td><td>sat</td><td class="off">&lt;asst&gt;</td><td class="r">r1</td><td class="r">r2</td><td class="r">on</td><td>the</td><td>mat</td><td>…</td></tr>
+</table></div>
+
+<p>The code makes three adjustments, each one quoted from the dataloader's docstring:</p>
+<ol>
+<li><strong>Loss mask:</strong> "Mask the pre-&lt;assistant&gt; position … so &lt;assistant&gt; is never an NTP target." The model never learns to <em>start</em> a reflection on its own.</li>
+<li><strong>Attention mask:</strong> "blocks post-context tokens from attending to the &lt;assistant&gt;/reflection region."</li>
+<li><strong>Position IDs:</strong> "Alias post-context position IDs back to the reflection insertion point so that RoPE distances are identical to inference."</li>
+</ol>
+
+<p>The resulting attention mask (row = query, column = key; ✓ = may attend, ✗ = blocked by SPP):</p>
+<div class="table-wrap"><table class="mask">
+<tr><th></th><th>0</th><th>1</th><th>2</th><th>3</th><th>4</th><th>5</th><th>6</th><th>7</th><th>8</th></tr>
+<tr><th>0</th><td class="y">✓</td><td class="n"></td><td class="n"></td><td class="n"></td><td class="n"></td><td class="n"></td><td class="n"></td><td class="n"></td><td class="n"></td></tr>
+<tr><th>1</th><td class="y">✓</td><td class="y">✓</td><td class="n"></td><td class="n"></td><td class="n"></td><td class="n"></td><td class="n"></td><td class="n"></td><td class="n"></td></tr>
+<tr><th>2</th><td class="y">✓</td><td class="y">✓</td><td class="y">✓</td><td class="n"></td><td class="n"></td><td class="n"></td><td class="n"></td><td class="n"></td><td class="n"></td></tr>
+<tr><th>3</th><td class="y">✓</td><td class="y">✓</td><td class="y">✓</td><td class="y">✓</td><td class="n"></td><td class="n"></td><td class="n"></td><td class="n"></td><td class="n"></td></tr>
+<tr><th>4</th><td class="y">✓</td><td class="y">✓</td><td class="y">✓</td><td class="y">✓</td><td class="y">✓</td><td class="n"></td><td class="n"></td><td class="n"></td><td class="n"></td></tr>
+<tr><th>5</th><td class="y">✓</td><td class="y">✓</td><td class="y">✓</td><td class="y">✓</td><td class="y">✓</td><td class="y">✓</td><td class="n"></td><td class="n"></td><td class="n"></td></tr>
+<tr><th>6</th><td class="y">✓</td><td class="y">✓</td><td class="y">✓</td><td class="x">✗</td><td class="x">✗</td><td class="x">✗</td><td class="y">✓</td><td class="n"></td><td class="n"></td></tr>
+<tr><th>7</th><td class="y">✓</td><td class="y">✓</td><td class="y">✓</td><td class="x">✗</td><td class="x">✗</td><td class="x">✗</td><td class="y">✓</td><td class="y">✓</td><td class="n"></td></tr>
+<tr><th>8</th><td class="y">✓</td><td class="y">✓</td><td class="y">✓</td><td class="x">✗</td><td class="x">✗</td><td class="x">✗</td><td class="y">✓</td><td class="y">✓</td><td class="y">✓</td></tr>
+</table></div>
+
+<div class="note">
+<strong>Porting heads-up for Levanter.</strong> Megatron passes separate <code>tokens</code>/<code>labels</code>. Levanter's <code>LmExample</code> holds one <code>tokens</code> array, plus a <code>loss_weight</code> where position <em>i</em> means "predict token i+1", and an <code>attn_mask</code>. It has <strong>no position-ID field</strong>, though the Llama model's forward pass accepts <code>pos_ids</code>.<a class="cite" href="https://github.com/marin-community/marin/blob/main/lib/levanter/src/levanter/models/lm_model.py">lm_model.py · LmExample</a> And Levanter's built-in document masking uses <em>segment IDs</em>, which can only express "same segment or not". The SPP pattern above isn't of that form. Lesson 3b covers how to express it efficiently.
+</div>
+
+<h2>4 · Check your map</h2>
+
+<div class="ex seq" data-answer="0,1,2,3,4,5,3,4,5">
+<p class="q"><span class="tag">Exercise 1</span>Write the 9 <strong>position IDs</strong> for indices 0–8 in the toy example. Use the rule: reflection tokens continue counting from <code>n</code>, and post-reflection tokens alias back to start at <code>n</code>.</p>
+<div class="explain"><code>0 1 2 | 3 4 5 | 3 4 5</code>. Now "on" (index 6, pos 3) is 1 position from "sat" (pos 2), exactly as if the reflection were never there. That's what happens at inference, where no reflections exist.</div>
+</div>
+
+<div class="ex mc" data-answer="1">
+<p class="q"><span class="tag">Exercise 2</span>Which key indices can the query at index 6 ("on") attend to?</p>
+<div class="opts">
+<button>{3,4,5,6}</button>
+<button>{0,1,2,6}</button>
+<button>{0,1,2,3}</button>
+<button>{0,4,5,6}</button>
+</div>
+<div class="explain">Causal (≤ 6), minus the SPP block on 3–5. The continuation is conditioned only on the original document.</div>
+</div>
+
+<div class="ex mc" data-answer="2">
+<p class="q"><span class="tag">Exercise 3</span>Which prediction has its loss weight set to 0?</p>
+<div class="opts">
+<button>The → cat</button>
+<button>&lt;asst&gt; → r1</button>
+<button>sat → &lt;asst&gt;</button>
+<button>r2 → on</button>
+</div>
+<div class="explain">The model should never learn to <em>emit</em> &lt;assistant&gt; spontaneously in the middle of text. &lt;asst&gt; → r1 <em>is</em> trained: given the marker, produce the reflection.</div>
+</div>
+
+<div class="ex mc" data-answer="0">
+<p class="q"><span class="tag">Exercise 4</span>The mask already hides the reflection from later tokens. Why alias their position IDs as well?</p>
+<div class="opts">
+<button>Later document tokens would see the prefix too far away</button>
+<button>Reflection tokens would see the document prefix too far away</button>
+<button>The causal mask would let reflections attend to the future</button>
+<button>The tokenizer would assign the reflection duplicate position ids</button>
+</div>
+<div class="explain">Masking removes the reflection's <em>content</em>, but without aliasing, "on" would sit at position 6 and see "sat" at distance 4 instead of 1. RoPE would make attention to the prefix behave differently from inference. Masking handles <em>what</em> is seen. Aliasing handles <em>where</em> it appears to be.</div>
+</div>
+
+<div class="ex mc" data-answer="3">
+<p class="q"><span class="tag">Exercise 5</span>Where does RoPE act in this model?</p>
+<div class="opts">
+<button>Token embeddings once, before the first layer</button>
+<button>Values and outputs inside every attention layer</button>
+<button>Logits once, after the final norm layer</button>
+<button>Queries and keys inside every attention layer</button>
+</div>
+<div class="explain">RoPE rotates q and k (not v) in every layer, using the position IDs. That's why SPP can change positions with a single input array and no architecture change.</div>
+</div>
+
+<div class="ex mc" data-answer="2">
+<p class="q"><span class="tag">Exercise 6</span>In this pipeline, what is <em>data mixing</em> responsible for?</p>
+<div class="opts">
+<button>how RoPE positions get assigned to every token</button>
+<button>which layers receive the reflection token gradients</button>
+<button>which documents fill each batch, and how often</button>
+<button>how attention scores get normalised per head</button>
+</div>
+<div class="explain">In SPP, mixing decides the 80.6% compact (packed) vs 19.4% annotated (one doc per padded window) streams, which documents get reflections, and when (token zero vs midtraining).<a class="cite" href="https://arxiv.org/abs/2608.13482">SPP Table 1</a></div>
+</div>
+
+<div class="score"></div>
+
+<h2>Think about it (bring your answer to the next session)</h2>
+<p>Look at the "predicts" row again. <code>r2</code> predicts <code>on</code>, and <code>r2</code> <em>can</em> see the reflection. So the first post-reflection token is predicted from reflection-conditioned context, even though the mask hides the reflection from every later token. Is that a leak, or intended? (The code comments call it a "legitimate 'close the reflection' target".) We'll come back to this in lesson 3b.</p>
+
+<div class="source">
+<strong>Do now (about 10 min):</strong> skim <code>_make_spp_sample</code> in <a href="https://github.com/epfl-dlab/spp-training/blob/main/pretraining/dataloaders/spp_dataloader.py">spp_dataloader.py</a>. You should recognise the three adjustments from this lesson. You don't need to follow every line yet.<br>
+<strong>Optional, later:</strong> Stanford CS336, Lecture 3: <em>Architectures, Hyperparameters</em> (slides and video are linked from the <a href="https://cs336.stanford.edu/spring2025">Spring 2025 course page</a>), for <em>why</em> modern models use pre-norm, RMSNorm and SwiGLU. It isn't needed for the SPP lessons.
+</div>
+
+<div class="ask">
+This lesson is a map. It's meant to show you <em>where</em> things are, not <em>how</em> they work. RoPE, masking and tokenization each get their own deep-dive lessons next. Pre-norm, GQA and SwiGLU come later because SPP doesn't touch them. Ask me in the terminal about anything on the map that's unclear.
+</div>
+
+<div class="next">
+<span>Side lesson: <a href="0001-the-6nd-compute-budget.html">the 6ND budget</a></span>
+<span>Next: Tokenization I: BPE from the inside (coming)</span>
+</div>
+
+</main>
+</body>
+</html>

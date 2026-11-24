@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Compute Budget Sheet</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body class="ref">
+<main>
+<div class="crumbs">Reference · <a href="glossary.html">Glossary</a> · From <a href="../lessons/0001-the-6nd-compute-budget.html">side lesson 01</a></div>
+<h1>Compute Budget Sheet</h1>
+<p class="subtitle">Napkin math for sizing a pretraining run.</p>
+<div class="grid2">
+<div>
+<h2>Core formulas</h2>
+<div class="eq">matmul (N×P)(P×M) = 2NPM FLOPs</div>
+<div class="eq">train C ≈ 6·N·D<span class="lbl">fwd 2 + bwd 4 per param per token</span></div>
+<div class="eq">D = TPP · N  ⇒  C = 6·TPP·N²</div>
+<div class="eq">time ≈ C / (chips · peak · MFU)</div>
+</div>
+<div>
+<h2>Corrections and rules of thumb</h2>
+<ul>
+<li>Attention FLOPs / matmul FLOPs ≈ T/(8·d<sub>model</sub>).</li>
+<li>Block remat → about 8ND actual FLOPs.</li>
+<li>Check whether N includes embeddings (Kaplan 2020 excluded them).</li>
+<li>Chinchilla ≈ 20 TPP (70B on 1.4T). Plan with about 40% MFU.</li>
+</ul>
+</div>
+</div>
+<h2>TPU peak (bf16, per chip)</h2>
+<div class="table-wrap"><table>
+<tr><th>Chip</th><th class="num">FLOPs/s</th><th class="num">@40% MFU</th></tr>
+<tr><td>v4p</td><td class="num">2.75e14</td><td class="num">1.10e14</td></tr>
+<tr><td>v5e</td><td class="num">1.97e14</td><td class="num">7.88e13</td></tr>
+<tr><td>v5p</td><td class="num">4.59e14</td><td class="num">1.84e14</td></tr>
+<tr><td>v6e</td><td class="num">9.20e14</td><td class="num">3.68e14</td></tr>
+</table></div>
+<h2>Reference runs</h2>
+<div class="table-wrap"><table>
+<tr><th>Run</th><th class="num">N</th><th class="num">D</th><th class="num">TPP</th><th class="num">C (6ND)</th></tr>
+<tr><td>Marin target</td><td class="num">1.4e9</td><td class="num">2.8e10</td><td class="num">20</td><td class="num">2.35e20</td></tr>
+<tr><td>SPP 3B</td><td class="num">3e9</td><td class="num">5e11</td><td class="num">≈167</td><td class="num">9.0e21</td></tr>
+<tr><td>Chinchilla</td><td class="num">7e10</td><td class="num">1.4e12</td><td class="num">20</td><td class="num">5.9e23</td></tr>
+<tr><td>Llama 3 70B</td><td class="num">7e10</td><td class="num">1.5e13</td><td class="num">≈214</td><td class="num">6.3e24</td></tr>
+</table></div>
+<p style="font-size:.85rem;color:var(--muted)">Sources: <a href="https://jax-ml.github.io/scaling-book/transformers">scaling book</a> · <a href="https://jax-ml.github.io/scaling-book/tpus">TPU specs</a> · <a href="https://arxiv.org/abs/2203.15556">Hoffmann 2022</a> · <a href="https://arxiv.org/abs/2001.08361">Kaplan 2020</a> · <a href="https://arxiv.org/abs/2608.13482">SPP</a></p>
+</main>
+</body>
+</html>

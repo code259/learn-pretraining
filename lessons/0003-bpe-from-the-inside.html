@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BPE From the Inside</title>
+<link rel="stylesheet" href="../assets/style.css">
+<script src="../assets/quiz.js" defer></script>
+</head>
+<body>
+<main>
+
+<div class="crumbs">Lesson 03 · Tokenization I · <a href="../reference/tokenization.html">Tokenization cheat sheet</a> · <a href="../reference/glossary.html">Glossary</a></div>
+<h1>BPE From the Inside</h1>
+<p class="subtitle">How SmolLM2's tokenizer turns text into IDs. You'll learn it by building one.</p>
+
+<p style="font-size:.9rem;color:var(--muted)"><strong>Type:</strong> deep dive. <strong>Time:</strong> about 15 min reading + 30–45 min coding. <strong>Required:</strong> this page + the coding exercise. Everything marked optional is optional.</p>
+
+<div class="mission">
+Every token SPP trains on, including documents, reflections and <code>&lt;assistant&gt;</code>, comes out of the SmolLM2 tokenizer. To port the data pipeline to Levanter you need to know exactly what it does to text. Otherwise you can't reason about insertion points, leading spaces, or why the reflection is tokenized <em>separately</em> and spliced in.
+</div>
+
+<h2>0 · Warm-up from Lesson 02</h2>
+<p>Answer from memory first. Don't look back at Lesson 02.</p>
+
+<div class="ex seq" data-answer="0,1,2,3,2,3,4">
+<p class="q"><span class="tag">Recall</span>A document <code>d0 d1 d2 d3 d4</code> gets the block <code>&lt;asst&gt; r1</code> inserted at <code>n = 2</code>. The sequence is <code>d0 d1 &lt;asst&gt; r1 d2 d3 d4</code>. Write the 7 position IDs.</p>
+<div class="explain"><code>0 1 | 2 3 | 2 3 4</code>. The reflection block continues from n, and the post-context restarts at n.</div>
+</div>
+
+<div class="ex mc" data-answer="1">
+<p class="q"><span class="tag">Recall</span>Which one decides what the model is trained to <em>produce</em>?</p>
+<div class="opts">
+<button>The attention mask</button>
+<button>The loss mask</button>
+<button>The causal mask</button>
+<button>The segment mask</button>
+</div>
+<div class="explain">The attention mask decides what a token can <em>see</em>. The loss mask decides which predictions are trained.</div>
+</div>
+
+<h2>1 · Start from bytes</h2>
+<p>A byte-level tokenizer first turns text into UTF-8 bytes, so every string becomes a sequence of integers 0–255. You never hit an "unknown word": in the worst case a character is just its bytes. GPT-2 introduced this to remove the out-of-vocabulary problem without needing a vocabulary of all Unicode.<a class="cite" href="https://cdn.openai.com/better-language-models/language_models_are_unsupervised_multitask_learners.pdf">Radford 2019 §2.2</a></p>
+<p>Bytes alone make sequences long: "The cat sat on the mat." is 23 bytes. <strong>BPE</strong> (byte-pair encoding) learns to merge frequent byte sequences into single tokens, and SmolLM2 turns those 23 bytes into 7 tokens. BPE came from compression and was adapted for NMT subwords by Sennrich et al.<a class="cite" href="https://arxiv.org/abs/1508.07909">Sennrich 2016</a></p>
+
+<h2>2 · Training: count pairs, merge the most frequent, repeat</h2>
+<ol>
+<li>Split the corpus into <strong>chunks</strong> (§3) and count how often each chunk occurs.</li>
+<li>Write each chunk as a sequence of bytes.</li>
+<li>Count every adjacent pair of symbols across all chunks, weighted by chunk frequency.</li>
+<li>Take the most frequent pair, add it to the vocab as a new symbol, and replace it everywhere.</li>
+<li>Repeat until vocab = 256 bytes + #merges + special tokens hits the target.</li>
+</ol>
+<p>The output is an <strong>ordered list of merges</strong>. That order is the tokenizer. SmolLM2's first merges are <code>Ġ t</code>, <code>Ġ a</code>, <code>i n</code>, <code>h e</code>…<a class="cite" href="https://huggingface.co/HuggingFaceTB/SmolLM2-1.7B/blob/main/tokenizer.json">SmolLM2 tokenizer.json</a> (<code>Ġ</code> is how GPT-2-style tokenizers <em>display</em> the space byte.<a class="cite" href="https://github.com/openai/gpt-2/blob/master/src/encoder.py">gpt-2 encoder.py · bytes_to_unicode</a>)</p>
+
+<h3>Do one by hand</h3>
+<p>This is Sennrich's classic toy corpus, already chunked into words with counts: <code>low ×5, lower ×2, widest ×3, newest ×6</code>. Break ties by choosing the <em>lexicographically greater</em> pair, the convention CS336's BPE assignment uses.<a class="cite" href="https://github.com/stanford-cs336/assignment1-basics">CS336 A1</a></p>
+
+<div class="ex mc" data-answer="3">
+<p class="q"><span class="tag">Exercise 1</span>What is the first merge? (Count every adjacent pair, weighted.)</p>
+<div class="opts">
+<button>e s</button>
+<button>l o</button>
+<button>w e</button>
+<button>s t</button>
+</div>
+<div class="explain">es = 6 (newest) + 3 (widest) = 9, and st = 9 as well. lo = 7, ow = 7, we = 8. It's a tie between <code>e s</code> and <code>s t</code>, and (s, t) &gt; (e, s), so <strong>st</strong> wins.</div>
+</div>
+
+<div class="ex seq" data-answer="est,ow,low">
+<p class="q"><span class="tag">Exercise 2</span>Keep going. What are merges 2, 3 and 4? Write each as the resulting token, e.g. <code>st, ?, ?, ?</code> → enter just the three after <code>st</code>.</p>
+<div class="explain">After st: <code>e st</code> = 9 → <strong>est</strong>. Then ow = lo = 7 (we has dropped, since newest is now n e w est), and (o, w) &gt; (l, o) → <strong>ow</strong>. Then <code>l ow</code> = 7 → <strong>low</strong>. Your code will reproduce exactly this.</div>
+</div>
+
+<h2>3 · Pre-tokenization: where merges are not allowed</h2>
+<p>Before BPE runs, a regex splits text into chunks, and <strong>merges never cross a chunk boundary</strong>. Without it, frequent sequences like <code>dog.</code>, <code>dog!</code> and <code>dog?</code> would each become their own token and waste vocab. GPT-2's pattern splits off letters, numbers, punctuation and whitespace, with a leading space staying attached to the word after it.<a class="cite" href="https://github.com/openai/gpt-2/blob/master/src/encoder.py">gpt-2 encoder.py</a></p>
+<p>SmolLM2 runs two pre-tokenizers in sequence: <code>Digits(individual_digits=true)</code>, then <code>ByteLevel(add_prefix_space=false)</code> with the GPT-2 regex. In practice:<a class="cite" href="https://huggingface.co/HuggingFaceTB/SmolLM2-1.7B/blob/main/tokenizer.json">tokenizer.json</a></p>
+
+<div class="table-wrap"><table>
+<tr><th>Input</th><th>SmolLM2 tokens</th></tr>
+<tr><td><code>The cat sat on the mat.</code></td><td class="mono">The · Ġcat · Ġsat · Ġon · Ġthe · Ġmat · .</td></tr>
+<tr><td><code>hello world</code></td><td class="mono">hello (28120) · Ġworld</td></tr>
+<tr><td><code> hello world</code></td><td class="mono">Ġhello (33662) · Ġworld</td></tr>
+<tr><td><code>$1,400</code></td><td class="mono">$ · 1 · , · 4 · 0 · 0</td></tr>
+<tr><td><code>violates [2.3].</code></td><td class="mono">violates · Ġ[ · 2 · . · 3 · ].</td></tr>
+<tr><td><code>unbelievably</code></td><td class="mono">un · belie · v · ably</td></tr>
+<tr><td><code>🤖</code> (4 bytes)</td><td class="mono">ðŁ · ¤ · ĸ  (3 tokens, display chars for raw bytes)</td></tr>
+</table></div>
+<p style="font-size:.85rem;color:var(--muted);margin-top:-.4rem">Produced by running the real SmolLM2 tokenizer with <code>add_special_tokens=False</code>.</p>
+
+<p>Two things to remember. (1) <strong>The leading space belongs to the token</strong>: <code>hello</code> and <code>Ġhello</code> are different IDs. (2) <strong>Every digit is its own token</strong>, so numbers cost one token per digit.</p>
+
+<h2>4 · Encoding: replay the merges in order</h2>
+<p>To encode new text: pre-tokenize, turn each chunk into bytes, then <strong>repeatedly apply whichever applicable merge was learned earliest</strong> until none applies. It is <em>not</em> "longest match in the vocab". Two tokenizers with the same vocab but different merge orders can split the same word differently.</p>
+
+<div class="ex num" data-answer="48900" data-tol="0" data-unit="merges">
+<p class="q"><span class="tag">Exercise 3</span>SmolLM2's vocab has 49,152 entries: 17 special tokens and 235 single-byte tokens. Everything else is a merge. How many merges?</p>
+<div class="explain">49,152 − 17 − 235 = <strong>48,900</strong>, which matches <code>len(merges)</code> in tokenizer.json. (Only 235 of 256 bytes are in the vocab, which is a small departure from "every byte is a token".)</div>
+</div>
+
+<h2>5 · Build it</h2>
+<p>Open <code>exercises/03-bpe/</code> in this workspace. <code>bpe.py</code> has six functions to implement; <code>pretokenize</code> is already given. Run the tests after each one:</p>
+<pre><code>cd exercises/03-bpe
+python test_bpe.py        # add -v for tracebacks</code></pre>
+<p>Order: <code>get_pair_counts</code> → <code>merge_word</code> → <code>train_from_counts</code> (the test checks it reproduces <code>st, est, ow, low, west, ne</code>) → <code>train_bpe</code> → <code>encode</code>/<code>decode</code> (round-trips <code>naïve café 🤖</code>). Expect 50–80 lines total. Plain Python is fine. This is data-pipeline code, not model code, so no JAX here.</p>
+<p><strong>Stretch:</strong> your <code>train_from_counts</code> recounts every pair after every merge. Real trainers update only the counts touched by the merge, and that's the main speedup in CS336's assignment. How would you do it?</p>
+
+<h2>6 · What this means for SPP</h2>
+<p>From <code>spp_dataloader.py</code>: the reflection is tokenized <em>on its own</em> with no BOS/EOS (<code>_encode_reflection</code>), then <code>[&lt;assistant&gt;] + reflection_ids</code> is spliced into the document's token array at token index <code>n</code>.<a class="cite" href="https://github.com/epfl-dlab/spp-training/blob/main/pretraining/dataloaders/spp_dataloader.py">spp_dataloader.py</a> <code>&lt;assistant&gt;</code> was appended to the vocab as ID 49152 by <code>extend_tokenizer.py</code>, along with 35 <code>&lt;charter_X.Y&gt;</code> tokens.<a class="cite" href="https://github.com/epfl-dlab/spp-training/blob/main/pretraining/extend_tokenizer.py">extend_tokenizer.py</a></p>
+
+<div class="ex mc" data-answer="1">
+<p class="q"><span class="tag">Exercise 4</span>Why splice reflection <em>token IDs</em> in, rather than insert the reflection <em>text</em> into the document and re-tokenize?</p>
+<div class="opts">
+<button>Retokenizing would make the reflection tokens longer</button>
+<button>Retokenizing could change the document's own tokens</button>
+<button>Retokenizing would remove the special assistant token</button>
+<button>Retokenizing could not run inside the data loader</button>
+</div>
+<div class="explain">Inserting text changes chunk boundaries next to the insertion point: a leading space can move, or a word can get split. The document's own tokens would then differ from the Vanilla run's. Splicing keeps them identical, so SPP vs Vanilla stays data-matched.</div>
+</div>
+
+<div class="ex mc" data-answer="3">
+<p class="q"><span class="tag">Exercise 5</span>Why do <code>hello</code> and <code> hello</code> get different IDs?</p>
+<div class="opts">
+<button>SmolLM2 lowercases text before running the merges</button>
+<button>The digit splitter treats spaces as separate chunks</button>
+<button>Byte fallback assigns spaces their own reserved ids</button>
+<button>The space byte is part of the chunk being merged</button>
+</div>
+<div class="explain">The regex attaches the leading space to the word's chunk, so <code>" hello"</code> merges into one token that includes the space. A reflection tokenized alone starts with no leading space, e.g. <code>I</code> (57) rather than <code>ĠI</code>. That's fine, as long as your Levanter port tokenizes it exactly the same way.</div>
+</div>
+
+<div class="ex mc" data-answer="2">
+<p class="q"><span class="tag">Exercise 6</span>How does encoding decide which merges to apply?</p>
+<div class="opts">
+<button>Longest vocabulary match first, scanning left to right</button>
+<button>Most frequent pair in the input text first</button>
+<button>Earliest-learned applicable merge first, repeated until none</button>
+<button>Random applicable merge, sampled by training frequency</button>
+</div>
+<div class="explain">Merge rank = training order. Encoding replays training's decisions on new text.</div>
+</div>
+
+<div class="score"></div>
+
+<h2>Think about it (bring your answer to the next session)</h2>
+<p>The insertion point <code>n</code> is a <em>token</em> index (<code>reflection_token_index</code>). From the table above, <code>unbelievably</code> is 4 tokens, so <code>n</code> could land in the middle of a word, between <code>un</code> and <code>belie</code>. Does that matter for what SPP is trying to do? Then check: grep <code>spp-data</code> for how <code>reflection_token_index</code> is chosen. Does it snap to word or sentence boundaries?</p>
+
+<div class="source">
+<strong>Required:</strong> nothing beyond this page and the exercise.<br>
+<strong>Optional (best single resource):</strong> Andrej Karpathy, <a href="https://www.youtube.com/watch?v=zduSFxRajkE"><em>Let's build the GPT Tokenizer</em></a> (about 2h), with code in <a href="https://github.com/karpathy/minbpe">minbpe</a>. Watch it if you want the GPT-2/GPT-4 regex details and tokenizer pathologies. <strong>Optional:</strong> <a href="https://www.youtube.com/watch?v=SQ3fZ1sAqXI">CS336 Lecture 1: <em>Overview and Tokenization</em></a> (Stanford, Spring 2025).
+</div>
+
+<div class="ask">
+Stuck on a test, or curious why something is designed the way it is (why the regex, why bytes rather than characters, how vocab size gets chosen)? Ask me in the terminal. I can also review your <code>bpe.py</code> once it passes.
+</div>
+
+<div class="next">
+<span>← <a href="0002-architecture-map.html">Lesson 02: The Architecture Map</a></span>
+<span>Next: Tokenization II: special tokens, packing, loss masks (coming)</span>
+</div>
+
+</main>
+</body>
+</html>

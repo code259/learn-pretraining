@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tokenization Sheet</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body class="ref">
+<main>
+<div class="crumbs">Reference · <a href="glossary.html">Glossary</a> · From <a href="../lessons/0003-bpe-from-the-inside.html">Lesson 03</a></div>
+<h1>Tokenization Sheet</h1>
+<p class="subtitle">Byte-level BPE, and the SmolLM2 facts that matter for SPP.</p>
+
+<div class="grid2">
+<div>
+<h2>Train</h2>
+<pre><code>chunks = Counter(pretokenize(corpus))
+words  = {bytes(chunk): n}
+repeat V - 256 - |specials| times:
+  pairs = Σ adjacent pairs × n
+  best  = argmax(count, then pair)
+  merges.append(best)
+  replace best in every word</code></pre>
+<h2>Encode</h2>
+<pre><code>for chunk in pretokenize(text):
+  w = bytes(chunk)
+  while some pair in w is a merge:
+    apply the LOWEST-rank one
+  emit ids</code></pre>
+<p>Merge order <em>is</em> the tokenizer. Encoding isn't longest-match.</p>
+</div>
+<div>
+<h2>Rules</h2>
+<ul>
+<li>Merges never cross pre-token chunk boundaries.</li>
+<li>The leading space belongs to the next word's token: <code>hello</code> ≠ <code>Ġhello</code>.</li>
+<li><code>Ġ</code> is only how the space byte is displayed (GPT-2 <code>bytes_to_unicode</code>).</li>
+<li>Decode = concatenate bytes, then UTF-8 decode. Individual tokens may be partial characters (🤖 = 3 tokens).</li>
+</ul>
+<h2>SmolLM2</h2>
+<ul>
+<li>BPE, vocab 49,152 = 235 bytes + 48,900 merges + 17 specials.</li>
+<li>Pre-tokenizer: <code>Digits(individual)</code> → <code>ByteLevel(add_prefix_space=false)</code>.</li>
+<li>Specials include <code>&lt;|endoftext|&gt;</code> (id 0), <code>&lt;|im_start|&gt;</code>, <code>&lt;|im_end|&gt;</code>.</li>
+<li>SPP adds <code>&lt;assistant&gt;</code> = 49152 plus 35 <code>&lt;charter_X.Y&gt;</code> tokens → 49,188, padded to 49,280 in Megatron.</li>
+</ul>
+<h2>SPP</h2>
+<ul>
+<li>Reflection tokenized alone, with no BOS/EOS and no leading space.</li>
+<li>Splice <code>[&lt;assistant&gt;] + ids</code> at token index n. Document tokens stay identical to Vanilla.</li>
+</ul>
+</div>
+</div>
+<p style="font-size:.85rem;color:var(--muted)">Sources: <a href="https://huggingface.co/HuggingFaceTB/SmolLM2-1.7B/blob/main/tokenizer.json">SmolLM2 tokenizer.json</a> · <a href="https://github.com/openai/gpt-2/blob/master/src/encoder.py">gpt-2 encoder.py</a> · <a href="https://arxiv.org/abs/1508.07909">Sennrich 2016</a> · <a href="https://github.com/epfl-dlab/spp-training">spp-training</a></p>
+</main>
+</body>
+</html>
